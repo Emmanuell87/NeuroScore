@@ -222,7 +222,27 @@ def file_mtime(path):
 
 
 @st.cache_data
+def load_reference_defaults():
+    defaults_path = Path("reference_defaults.pkl")
+    if defaults_path.exists():
+        return joblib.load(defaults_path)
+    return None
+
+
+@st.cache_data
+def load_demo_profiles():
+    demos_path = Path("demo_profiles.pkl")
+    if demos_path.exists():
+        return joblib.load(demos_path)
+    return None
+
+
+@st.cache_data
 def build_full_demo_profiles(feature_names, cat_features, defaults, _loan_version, _score_version):
+    cached_profiles = load_demo_profiles()
+    if cached_profiles is not None:
+        return cached_profiles
+
     loan = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
 
     def row_to_profile(row):
@@ -325,6 +345,10 @@ def load_population_data(_population_version):
 
 @st.cache_data
 def build_reference_values(feature_names, cat_features, _loan_version):
+    cached_defaults = load_reference_defaults()
+    if cached_defaults is not None:
+        return cached_defaults
+
     df = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
     defaults = {}
 
