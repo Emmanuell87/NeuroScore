@@ -9,7 +9,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import roc_auc_score, roc_curve, classification_report
+from sklearn.metrics import roc_auc_score, roc_curve, classification_report, brier_score_loss, f1_score
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.isotonic import IsotonicRegression
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, regularizers
@@ -61,7 +63,7 @@ num_features = [
     'annual_inc', 'annual_inc_joint', 'collections_12_mths_ex_med', 'delinq_2yrs',
     'dti', 'dti_joint', 'fico_range_high', 'fico_range_low', 'funded_amnt',
     'funded_amnt_inv', 'inq_last_6mths', 'installment', 'int_rate',
-    'last_fico_range_high', 'last_fico_range_low', 'loan_amnt',
+    'loan_amnt',
     'mths_since_last_delinq', 'mths_since_last_major_derog', 'mths_since_last_record',
     'open_acc', 'pub_rec', 'revol_bal', 'revol_util', 'total_acc',
     'open_acc_6m', 'open_il_6m', 'open_il_12m', 'open_il_24m', 'mths_since_rcnt_il',
@@ -152,6 +154,12 @@ X_test_scaled = scaler.transform(X_test)
 
 print(f"Entrenamiento: {X_train_scaled.shape}, Validación: {X_val_scaled.shape}, Test: {X_test_scaled.shape}")
 
+# Ponderación de clases para reducir sesgo por desbalance
+classes = np.array([0, 1])
+class_weights_array = compute_class_weight(class_weight='balanced', classes=classes, y=y_train)
+class_weight_dict = {int(c): float(w) for c, w in zip(classes, class_weights_array)}
+print(f"[INFO] Class weights: {class_weight_dict}")
+
 # ---------------------------
 # 7. OPTIMIZACIÓN DE RED NEURONAL CON KERAS TUNER
 # ---------------------------
@@ -197,6 +205,7 @@ tuner.search(
     epochs=20,
     callbacks=[stop_early],
     batch_size=512,
+    class_weight=class_weight_dict,
     verbose=1
 )
 
@@ -212,18 +221,43 @@ history = model.fit(
     validation_data=(X_val_scaled, y_val),
     epochs=50,
     batch_size=512,
+    class_weight=class_weight_dict,
     callbacks=[keras.callbacks.EarlyStopping(monitor='val_auc', patience=10, mode='max', restore_best_weights=True)],
     verbose=1
 )
 
-# Evaluación
-y_pred_proba = model.predict(X_test_scaled).flatten()
-auc_score = roc_auc_score(y_test, y_pred_proba)
-print(f"\n[RESULT] AUC en Test (Red Neuronal Optimizada): {auc_score:.4f}")
+# Calibración de probabilidad (PD) con set de validación
+y_val_raw = model.predict(X_val_scaled, verbose=0).flatten()
+y_val_raw = np.clip(y_val_raw, 1e-6, 1 - 1e-6)
 
-# Reporte de clasificación con umbral base 0.5
-y_pred_label = (y_pred_proba >= 0.5).astype(int)
-print("\n[REPORT] Classification report (threshold=0.50):")
+calibrator = IsotonicRegression(out_of_bounds='clip')
+calibrator.fit(y_val_raw, y_val)
+
+# Evaluación en test con PD calibrada
+y_test_raw = model.predict(X_test_scaled, verbose=0).flatten()
+y_test_raw = np.clip(y_test_raw, 1e-6, 1 - 1e-6)
+y_pred_proba = np.clip(calibrator.transform(y_test_raw), 1e-6, 1 - 1e-6)
+
+auc_score = roc_auc_score(y_test, y_pred_proba)
+brier = brier_score_loss(y_test, y_pred_proba)
+print(f"\n[RESULT] AUC en Test (PD calibrada): {auc_score:.4f}")
+print(f"[RESULT] Brier score en Test (PD calibrada): {brier:.4f}")
+
+# Umbral optimizado por F1 en validación
+y_val_cal = np.clip(calibrator.transform(y_val_raw), 1e-6, 1 - 1e-6)
+candidate_thresholds = np.linspace(0.05, 0.95, 37)
+best_thr = 0.50
+best_f1 = -1.0
+for thr in candidate_thresholds:
+    f1 = f1_score(y_val, (y_val_cal >= thr).astype(int))
+    if f1 > best_f1:
+        best_f1 = f1
+        best_thr = float(thr)
+print(f"[RESULT] Umbral seleccionado por F1 (validación): {best_thr:.2f}")
+
+# Reporte de clasificación con umbral optimizado
+y_pred_label = (y_pred_proba >= best_thr).astype(int)
+print(f"\n[REPORT] Classification report (threshold={best_thr:.2f}):")
 print(classification_report(y_test, y_pred_label, digits=4))
 
 # Gráfica ROC
@@ -251,8 +285,9 @@ B = PDO / np.log(2)
 A = SCORE_AT_ODDS - B * np.log(ODDS_REF)
 
 eps = 1e-6
-pd_all = model.predict(scaler.transform(X)).flatten()
-pd_all = np.clip(pd_all, eps, 1 - eps)
+pd_all_raw = model.predict(scaler.transform(X), verbose=0).flatten()
+pd_all_raw = np.clip(pd_all_raw, eps, 1 - eps)
+pd_all = np.clip(calibrator.transform(pd_all_raw), eps, 1 - eps)
 odds_all = (1 - pd_all) / pd_all
 score_all = A + B * np.log(odds_all)
 
@@ -260,6 +295,7 @@ scorecard_df = pd.DataFrame({
     'pd_bad': pd_all,
     'score': score_all,
     'target': y.values,
+    'source_index': X.index.values,
 })
 
 # Resumen tipo scorecard por deciles
@@ -299,7 +335,9 @@ else:
     y_eval = y_test.copy()
 
 X_eval_scaled = scaler.transform(X_eval_df)
-y_eval_pred = model.predict(X_eval_scaled, verbose=0).flatten()
+y_eval_raw = model.predict(X_eval_scaled, verbose=0).flatten()
+y_eval_raw = np.clip(y_eval_raw, 1e-6, 1 - 1e-6)
+y_eval_pred = np.clip(calibrator.transform(y_eval_raw), 1e-6, 1 - 1e-6)
 baseline_auc_eval = roc_auc_score(y_eval, y_eval_pred)
 
 rng = np.random.default_rng(42)
@@ -308,7 +346,9 @@ risk_rows = []
 for i, col in enumerate(X.columns):
     X_perm = X_eval_scaled.copy()
     X_perm[:, i] = rng.permutation(X_perm[:, i])
-    y_perm_pred = model.predict(X_perm, verbose=0).flatten()
+    y_perm_raw = model.predict(X_perm, verbose=0).flatten()
+    y_perm_raw = np.clip(y_perm_raw, 1e-6, 1 - 1e-6)
+    y_perm_pred = np.clip(calibrator.transform(y_perm_raw), 1e-6, 1 - 1e-6)
     auc_perm = roc_auc_score(y_eval, y_perm_pred)
     auc_drop = baseline_auc_eval - auc_perm
 
@@ -347,6 +387,7 @@ joblib.dump(scaler, 'scaler_nn.pkl')
 joblib.dump(label_encoders, 'label_encoders_nn.pkl')
 joblib.dump(list(X.columns), 'feature_names_nn.pkl')
 joblib.dump({'A': A, 'B': B, 'PDO': PDO, 'score_at_odds': SCORE_AT_ODDS, 'odds_ref': ODDS_REF}, 'scorecard_params.pkl')
+joblib.dump(calibrator, 'pd_calibrator.pkl')
 
 scorecard_df.to_csv('scorecard_poblacion.csv', index=False)
 scorecard_summary.to_csv('scorecard_resumen_deciles.csv', index=False)

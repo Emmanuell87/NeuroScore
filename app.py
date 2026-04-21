@@ -4,6 +4,7 @@ import joblib
 import streamlit as st
 import tensorflow as tf
 import altair as alt
+from pathlib import Path
 
 
 st.set_page_config(page_title="Credit Risk Scorecard", layout="wide")
@@ -215,29 +216,57 @@ def pretty_loan_status(raw_status):
     return LOAN_STATUS_TRANSLATIONS.get(text, text)
 
 
-def build_full_demo_profiles(feature_names, cat_features):
-    loan = pd.read_csv("loan/loan.csv", low_memory=False)
+def file_mtime(path):
+    p = Path(path)
+    return p.stat().st_mtime if p.exists() else 0.0
+
+
+@st.cache_data
+def build_full_demo_profiles(feature_names, cat_features, defaults, _loan_version, _score_version):
+    loan = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
 
     def row_to_profile(row):
         profile = {}
         for col in feature_names:
             if col in cat_features:
-                profile[col] = str(row[col]) if pd.notna(row[col]) else "Missing"
+                profile[col] = str(row[col]) if pd.notna(row[col]) else defaults[col]
             else:
                 value = pd.to_numeric(row[col], errors="coerce") if col in row.index else np.nan
-                profile[col] = float(value) if pd.notna(value) else 0.0
+                profile[col] = float(value) if pd.notna(value) else float(defaults[col])
         return profile
 
     scored = pd.read_csv("scorecard_poblacion.csv")
 
     low_idx = scored[scored["target"] == 0]["pd_bad"].idxmin()
-    med_idx = (scored["pd_bad"] - scored["pd_bad"].median()).abs().idxmin()
     high_idx = scored[scored["target"] == 1]["pd_bad"].idxmax()
 
+    def row_from_scored_idx(scored_idx):
+        if "source_index" in scored.columns:
+            src_idx = int(scored.loc[scored_idx, "source_index"])
+            if src_idx in loan.index:
+                return loan.loc[src_idx]
+        # Fallback para artefactos antiguos sin source_index
+        return loan.loc[scored_idx]
+
+    low_profile = row_to_profile(row_from_scored_idx(low_idx))
+    high_profile = row_to_profile(row_from_scored_idx(high_idx))
+
+    # Perfil medio sintético entre bajo y alto para asegurar una zona
+    # realmente intermedia en la demo (sin alterar el modelo entrenado).
+    alpha_medium = 0.70
+    medium_profile = {}
+    for col in feature_names:
+        if col in cat_features:
+            medium_profile[col] = high_profile[col] if alpha_medium >= 0.5 else low_profile[col]
+        else:
+            low_val = float(low_profile[col])
+            high_val = float(high_profile[col])
+            medium_profile[col] = low_val * (1 - alpha_medium) + high_val * alpha_medium
+
     profiles = {
-        "Caso real - Bajo riesgo": row_to_profile(loan.loc[low_idx]),
-        "Caso real - Riesgo medio": row_to_profile(loan.loc[med_idx]),
-        "Caso real - Alto riesgo": row_to_profile(loan.loc[high_idx]),
+        "Caso real - Bajo riesgo": low_profile,
+        "Caso real - Riesgo medio": medium_profile,
+        "Caso real - Alto riesgo": high_profile,
     }
 
     return profiles
@@ -274,17 +303,20 @@ def build_widget_profile(demo_choice, mode, demo_cases, defaults, core_numeric, 
 
 
 @st.cache_resource
-def load_artifacts():
+def load_artifacts(_artifact_version):
     model = tf.keras.models.load_model("modelo_nn_credit_risk.h5", compile=False)
     scaler = joblib.load("scaler_nn.pkl")
     label_encoders = joblib.load("label_encoders_nn.pkl")
     feature_names = joblib.load("feature_names_nn.pkl")
     score_params = joblib.load("scorecard_params.pkl")
-    return model, scaler, label_encoders, feature_names, score_params
+    calibrator = None
+    if Path("pd_calibrator.pkl").exists():
+        calibrator = joblib.load("pd_calibrator.pkl")
+    return model, scaler, label_encoders, feature_names, score_params, calibrator
 
 
 @st.cache_data
-def load_population_data():
+def load_population_data(_population_version):
     score_pop = pd.read_csv("scorecard_poblacion.csv")
     score_deciles = pd.read_csv("scorecard_resumen_deciles.csv")
     risk_analysis = pd.read_csv("analisis_variables_riesgo.csv")
@@ -292,8 +324,8 @@ def load_population_data():
 
 
 @st.cache_data
-def build_reference_values(feature_names, cat_features):
-    df = pd.read_csv("loan/loan.csv", low_memory=False)
+def build_reference_values(feature_names, cat_features, _loan_version):
+    df = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
     defaults = {}
 
     for col in feature_names:
@@ -322,6 +354,32 @@ def compute_score(pd_bad, score_params):
     return float(a + b * np.log(odds))
 
 
+def calibrate_pd(pd_raw, calibrator):
+    pd_raw = float(np.clip(pd_raw, 1e-6, 1 - 1e-6))
+    if calibrator is None:
+        return pd_raw
+
+    try:
+        x_thr = getattr(calibrator, "X_thresholds_", None)
+        if x_thr is not None and len(x_thr) > 1:
+            # Si cae fuera del rango aprendido por la calibración isotónica,
+            # evitamos clip constante y usamos la PD cruda del modelo.
+            if pd_raw < float(x_thr[0]) or pd_raw > float(x_thr[-1]):
+                return pd_raw
+
+        pd_cal = float(calibrator.transform([pd_raw])[0])
+        pd_cal = float(np.clip(pd_cal, 1e-6, 1 - 1e-6))
+
+        # Si la calibración colapsa demasiado cerca de cero, usamos la PD cruda.
+        # Esto evita que todos los casos terminen con el mismo valor.
+        if pd_cal <= 1e-5 and pd_raw > pd_cal:
+            return pd_raw
+
+        return pd_cal
+    except Exception:
+        return pd_raw
+
+
 def encode_input(user_input, feature_names, label_encoders):
     row = {}
 
@@ -329,16 +387,37 @@ def encode_input(user_input, feature_names, label_encoders):
         if col in label_encoders:
             encoder = label_encoders[col]
             classes = encoder.classes_.tolist()
-            value = str(user_input[col])
+            value = str(user_input[col]).strip()
 
             if value not in classes:
-                value = "Missing" if "Missing" in classes else classes[0]
+                normalized_classes = {str(c).strip().lower(): c for c in classes}
+                value_norm = value.lower()
+                if value_norm in normalized_classes:
+                    value = normalized_classes[value_norm]
+                else:
+                    value = "Missing" if "Missing" in classes else classes[0]
 
             row[col] = int(encoder.transform([value])[0])
         else:
             row[col] = float(user_input[col])
 
     return pd.DataFrame([row], columns=feature_names)
+
+
+def harmonize_user_input(user_input, mode, feature_names):
+    data = user_input.copy()
+
+    # En modo básico, al no exponer todas las variables, forzamos consistencia
+    # entre montos fuertemente relacionados para evitar perfiles incoherentes.
+    if mode == "Basico (normal, recomendado)":
+        if "loan_amnt" in data:
+            loan_amt = float(data["loan_amnt"])
+            if "funded_amnt" in feature_names:
+                data["funded_amnt"] = loan_amt
+            if "funded_amnt_inv" in feature_names:
+                data["funded_amnt_inv"] = loan_amt
+
+    return data
 
 
 def render_numeric_inputs(feature_list, defaults, values_store, key_prefix, n_cols=3):
@@ -393,8 +472,23 @@ def main():
     st.sidebar.markdown(f"[Material publicitario]({MARKETING_MATERIAL_URL})")
     
 
-    model, scaler, label_encoders, feature_names, score_params = load_artifacts()
-    score_pop, score_deciles, risk_analysis = load_population_data()
+    artifact_version = (
+        file_mtime("modelo_nn_credit_risk.h5"),
+        file_mtime("scaler_nn.pkl"),
+        file_mtime("label_encoders_nn.pkl"),
+        file_mtime("feature_names_nn.pkl"),
+        file_mtime("scorecard_params.pkl"),
+        file_mtime("pd_calibrator.pkl"),
+    )
+    population_version = (
+        file_mtime("scorecard_poblacion.csv"),
+        file_mtime("scorecard_resumen_deciles.csv"),
+        file_mtime("analisis_variables_riesgo.csv"),
+    )
+    loan_version = file_mtime("loan/loan.csv")
+
+    model, scaler, label_encoders, feature_names, score_params, calibrator = load_artifacts(artifact_version)
+    score_pop, score_deciles, risk_analysis = load_population_data(population_version)
 
     score_deciles_view = score_deciles.rename(
         columns={
@@ -430,12 +524,19 @@ def main():
 
     cat_features = list(label_encoders.keys())
     numeric_features = [c for c in feature_names if c not in cat_features]
-    defaults = build_reference_values(feature_names, cat_features)
-    widget_defaults = defaults.copy()
+    defaults = build_reference_values(feature_names, cat_features, loan_version)
+    scoring_defaults = defaults.copy()
+    display_defaults = defaults.copy()
     for col in numeric_features:
-        widget_defaults[col] = 0
+        display_defaults[col] = 0
 
-    demo_cases = build_full_demo_profiles(feature_names, cat_features)
+    demo_cases = build_full_demo_profiles(
+        feature_names,
+        cat_features,
+        defaults,
+        loan_version,
+        file_mtime("scorecard_poblacion.csv"),
+    )
 
     core_numeric = [
         c for c in [
@@ -462,10 +563,19 @@ def main():
             key="demo_choice",
         )
         if st.button("Cargar caso de prueba"):
-            mode_selected = st.session_state.get("capture_mode", "Basico (normal, recomendado)")
-            widget_profile = build_widget_profile(
+            widget_profile_basic = build_widget_profile(
                 st.session_state.demo_choice,
-                mode_selected,
+                "Basico (normal, recomendado)",
+                demo_cases,
+                defaults,
+                core_numeric,
+                core_categorical,
+                numeric_features,
+                cat_features,
+            )
+            widget_profile_adv = build_widget_profile(
+                st.session_state.demo_choice,
+                "Avanzado",
                 demo_cases,
                 defaults,
                 core_numeric,
@@ -474,14 +584,12 @@ def main():
                 cat_features,
             )
             st.session_state.demo_profile = demo_cases.get(st.session_state.demo_choice, {})
-            st.session_state.demo_applied_mode = mode_selected
-            for key, value in widget_profile.items():
+            for key, value in {**widget_profile_basic, **widget_profile_adv}.items():
                 st.session_state[key] = value
             st.rerun()
 
         if st.button("Limpiar caso de prueba"):
             st.session_state.demo_profile = {}
-            st.session_state.demo_applied_mode = None
             for col in numeric_features:
                 st.session_state.pop(f"adv_num_{col}", None)
             for col in core_numeric:
@@ -504,51 +612,38 @@ def main():
             "Básico (normal): pides solo variables clave y el resto toma valores típicos. "
             "Avanzado: pides todas las variables del modelo."
         )
-
-        if st.session_state.get("demo_profile"):
-            if st.session_state.get("demo_applied_mode") != mode:
-                active_demo_choice = st.session_state.get("demo_choice", "Ninguno")
-                widget_profile = build_widget_profile(
-                    active_demo_choice,
-                    mode,
-                    demo_cases,
-                    defaults,
-                    core_numeric,
-                    core_categorical,
-                    numeric_features,
-                    cat_features,
-                )
-                for key, value in widget_profile.items():
-                    st.session_state[key] = value
-                st.session_state.demo_applied_mode = mode
-                st.rerun()
+        st.caption(
+            "En ambos modos, el cálculo final usa el mismo modelo; la diferencia está en cuántas variables completa el usuario y cuántas toma como referencia."
+        )
 
         with st.form("prediction_form"):
-            user_input = widget_defaults.copy()
+            user_input = scoring_defaults.copy()
             if "demo_profile" in st.session_state and st.session_state.demo_profile:
                 user_input.update(st.session_state.demo_profile)
 
             if mode == "Basico (normal, recomendado)":
                 st.info("En este modo solo editas variables clave. Las demás variables se completan automáticamente con valores de referencia.")
                 st.markdown("### Variables numéricas clave")
-                render_numeric_inputs(core_numeric, widget_defaults, user_input, key_prefix="basic_num", n_cols=3)
+                render_numeric_inputs(core_numeric, display_defaults, user_input, key_prefix="basic_num", n_cols=3)
 
                 st.markdown("### Variables categóricas clave")
-                render_categorical_inputs(core_categorical, widget_defaults, user_input, label_encoders, key_prefix="basic_cat", n_cols=3)
+                render_categorical_inputs(core_categorical, display_defaults, user_input, label_encoders, key_prefix="basic_cat", n_cols=3)
             else:
                 st.info("Modo avanzado activo: puedes editar todas las variables que usa el modelo.")
                 st.markdown("### Variables numéricas")
-                render_numeric_inputs(numeric_features, widget_defaults, user_input, key_prefix="adv_num", n_cols=3)
+                render_numeric_inputs(numeric_features, display_defaults, user_input, key_prefix="adv_num", n_cols=3)
 
                 st.markdown("### Variables categóricas")
-                render_categorical_inputs(cat_features, widget_defaults, user_input, label_encoders, key_prefix="adv_cat", n_cols=3)
+                render_categorical_inputs(cat_features, display_defaults, user_input, label_encoders, key_prefix="adv_cat", n_cols=3)
 
             submitted = st.form_submit_button("Calcular score")
 
         if submitted:
-            x_input = encode_input(user_input, feature_names, label_encoders)
+            user_input_consistent = harmonize_user_input(user_input, mode, feature_names)
+            x_input = encode_input(user_input_consistent, feature_names, label_encoders)
             x_scaled = scaler.transform(x_input)
-            pd_bad = float(model.predict(x_scaled, verbose=0).flatten()[0])
+            pd_raw = float(model.predict(x_scaled, verbose=0).flatten()[0])
+            pd_bad = calibrate_pd(pd_raw, calibrator)
             score = compute_score(pd_bad, score_params)
 
             score_percentile = float((score_pop["score"] <= score).mean() * 100)
@@ -560,9 +655,20 @@ def main():
             c2.metric("Score", f"{score:.1f}")
             c3.metric("Percentil de score", f"{score_percentile:.1f}")
 
-            if pd_bad >= 0.30:
+            st.markdown(
+                """
+                **Cómo leer este resultado**
+                - **PD**: probabilidad estimada de incumplir. Mientras más alta, más riesgoso es el perfil.
+                - **Score**: número resumido del riesgo. Mientras más alto, mejor comportamiento esperado.
+                - **Percentil de score**: tu posición frente a la población por score. Un valor alto significa que tu score está por encima de la mayoría.
+                - **Percentil por PD**: tu posición frente a la población por probabilidad de incumplimiento. Un valor alto significa más riesgo.
+                """
+            )
+
+            # Banda de riesgo relativa a la población (más robusta que umbral fijo de PD)
+            if pd_percentile >= 70:
                 band = "Alto riesgo"
-            elif pd_bad >= 0.15:
+            elif pd_percentile >= 40:
                 band = "Riesgo medio"
             else:
                 band = "Bajo riesgo"
@@ -582,8 +688,8 @@ def main():
 
         st.subheader("Comparación por deciles")
         st.caption(
-            "Los deciles dividen la población en 10 grupos de tamaño similar según su score. "
-            "Sirven para comparar rápidamente el riesgo relativo entre segmentos."
+            "La población se divide en 10 grupos según el score. El decil 9 concentra los mejores scores y el decil 0 los peores. "
+            "Si tu score cae en un decil bajo, tu perfil es más riesgoso que la mayoría de la población."
         )
         st.dataframe(score_deciles_view, use_container_width=True)
 
