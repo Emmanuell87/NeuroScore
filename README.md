@@ -36,7 +36,7 @@ Redes_neuronales/
 
 ---
 
-## 🔄 Flujo de Funcionamiento
+## Flujo de Funcionamiento
 
 ### **Fase 1: Entrenamiento (codigo.py)**
 
