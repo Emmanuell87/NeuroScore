@@ -595,7 +595,7 @@ def main():
             if pd_percentile >= 70:
                 band = " Alto riesgo"
                 color = "red"
-            elif pd_percentile >= 30:
+            elif pd_percentile >= 25:
                 band = " Riesgo medio"
                 color = "orange"
             else:
