@@ -6,7 +6,6 @@ import tensorflow as tf
 import altair as alt
 from pathlib import Path
 
-
 st.set_page_config(page_title="Credit Risk Scorecard", layout="wide")
 
 # Reemplaza estos enlaces con tus URLs finales de entrega
@@ -128,6 +127,12 @@ FRIENDLY_LABELS = {
     "pymnt_plan": "Plan de pago",
     "sub_grade": "Subgrado de crédito",
     "term": "Plazo",
+    "fico_range_low": "FICO (rango bajo)",
+    "fico_range_high": "FICO (rango alto)",
+    "last_fico_range_low": "Último FICO (rango bajo)",
+    "last_fico_range_high": "Último FICO (rango alto)",
+    "verified_status_joint": "Ingreso conjunto verificado",
+    "is_inc_v": "Ingreso verificado",
 }
 
 VALUE_TRANSLATIONS = {
@@ -171,6 +176,16 @@ VALUE_TRANSLATIONS = {
         "f": "Fraccional",
         "w": "Completo",
     },
+    "verified_status_joint": {
+        "Not Verified": "No verificado",
+        "Verified": "Verificado",
+        "Source Verified": "Fuente verificada",
+    },
+    "is_inc_v": {
+        "Not Verified": "No verificado",
+        "Verified": "Verificado",
+        "Source Verified": "Fuente verificada",
+    },
 }
 
 INTEGER_FEATURES = {
@@ -206,8 +221,6 @@ def pretty_category_value(col_name, raw_value):
     mapped = VALUE_TRANSLATIONS.get(col_name, {}).get(raw_text)
     if mapped is not None:
         return mapped
-
-    # Fallback legible si no hay traduccion manual para ese valor.
     return raw_text.replace("_", " ").replace("-", " ").title()
 
 
@@ -216,80 +229,28 @@ def pretty_loan_status(raw_status):
     return LOAN_STATUS_TRANSLATIONS.get(text, text)
 
 
-def file_mtime(path):
-    p = Path(path)
-    return p.stat().st_mtime if p.exists() else 0.0
-
-
 @st.cache_data
 def load_reference_defaults():
+    """Carga los valores de referencia desde el archivo .pkl"""
     defaults_path = Path("reference_defaults.pkl")
     if defaults_path.exists():
         return joblib.load(defaults_path)
-    return None
+    raise FileNotFoundError(
+        "❌ reference_defaults.pkl no encontrado.\n\n"
+        "Este archivo es OBLIGATORIO para la app.\n"
+        "Ejecuta primero 'codigo.py' para generar este archivo.\n"
+        "No necesitas el archivo loan.csv para desplegar la app."
+    )
 
 
 @st.cache_data
 def load_demo_profiles():
+    """Carga perfiles de demostración si existen"""
     demos_path = Path("demo_profiles.pkl")
     if demos_path.exists():
         return joblib.load(demos_path)
-    return None
-
-
-@st.cache_data
-def build_full_demo_profiles(feature_names, cat_features, defaults, _loan_version, _score_version):
-    cached_profiles = load_demo_profiles()
-    if cached_profiles is not None:
-        return cached_profiles
-
-    loan = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
-
-    def row_to_profile(row):
-        profile = {}
-        for col in feature_names:
-            if col in cat_features:
-                profile[col] = str(row[col]) if pd.notna(row[col]) else defaults[col]
-            else:
-                value = pd.to_numeric(row[col], errors="coerce") if col in row.index else np.nan
-                profile[col] = float(value) if pd.notna(value) else float(defaults[col])
-        return profile
-
-    scored = pd.read_csv("scorecard_poblacion.csv")
-
-    low_idx = scored[scored["target"] == 0]["pd_bad"].idxmin()
-    high_idx = scored[scored["target"] == 1]["pd_bad"].idxmax()
-
-    def row_from_scored_idx(scored_idx):
-        if "source_index" in scored.columns:
-            src_idx = int(scored.loc[scored_idx, "source_index"])
-            if src_idx in loan.index:
-                return loan.loc[src_idx]
-        # Fallback para artefactos antiguos sin source_index
-        return loan.loc[scored_idx]
-
-    low_profile = row_to_profile(row_from_scored_idx(low_idx))
-    high_profile = row_to_profile(row_from_scored_idx(high_idx))
-
-    # Perfil medio sintético entre bajo y alto para asegurar una zona
-    # realmente intermedia en la demo (sin alterar el modelo entrenado).
-    alpha_medium = 0.70
-    medium_profile = {}
-    for col in feature_names:
-        if col in cat_features:
-            medium_profile[col] = high_profile[col] if alpha_medium >= 0.5 else low_profile[col]
-        else:
-            low_val = float(low_profile[col])
-            high_val = float(high_profile[col])
-            medium_profile[col] = low_val * (1 - alpha_medium) + high_val * alpha_medium
-
-    profiles = {
-        "Caso real - Bajo riesgo": low_profile,
-        "Caso real - Riesgo medio": medium_profile,
-        "Caso real - Alto riesgo": high_profile,
-    }
-
-    return profiles
+    # Si no existe, devolvemos un diccionario vacío (la app funcionará sin demos)
+    return {}
 
 
 def build_widget_profile(demo_choice, mode, demo_cases, defaults, core_numeric, core_categorical, numeric_features, cat_features):
@@ -323,7 +284,8 @@ def build_widget_profile(demo_choice, mode, demo_cases, defaults, core_numeric, 
 
 
 @st.cache_resource
-def load_artifacts(_artifact_version):
+def load_artifacts():
+    """Carga modelo, scaler, encoders y parámetros de scorecard"""
     model = tf.keras.models.load_model("modelo_nn_credit_risk.h5", compile=False)
     scaler = joblib.load("scaler_nn.pkl")
     label_encoders = joblib.load("label_encoders_nn.pkl")
@@ -336,41 +298,16 @@ def load_artifacts(_artifact_version):
 
 
 @st.cache_data
-def load_population_data(_population_version):
+def load_population_data():
+    """Carga datos poblacionales para comparación"""
     score_pop = pd.read_csv("scorecard_poblacion.csv")
     score_deciles = pd.read_csv("scorecard_resumen_deciles.csv")
     risk_analysis = pd.read_csv("analisis_variables_riesgo.csv")
     return score_pop, score_deciles, risk_analysis
 
 
-@st.cache_data
-def build_reference_values(feature_names, cat_features, _loan_version):
-    cached_defaults = load_reference_defaults()
-    if cached_defaults is not None:
-        return cached_defaults
-
-    df = pd.read_csv("loan/loan.csv", low_memory=False, usecols=feature_names)
-    defaults = {}
-
-    for col in feature_names:
-        if col in cat_features:
-            if col in df.columns:
-                mode_series = df[col].dropna().astype(str)
-                defaults[col] = mode_series.mode().iloc[0] if not mode_series.empty else "Missing"
-            else:
-                defaults[col] = "Missing"
-        else:
-            if col in df.columns:
-                num = pd.to_numeric(df[col], errors="coerce")
-                med = num.median()
-                defaults[col] = float(med) if pd.notna(med) else 0.0
-            else:
-                defaults[col] = 0.0
-
-    return defaults
-
-
 def compute_score(pd_bad, score_params):
+    """Convierte PD a score crediticio"""
     pd_bad = np.clip(pd_bad, 1e-6, 1 - 1e-6)
     odds = (1 - pd_bad) / pd_bad
     a = score_params["A"]
@@ -379,6 +316,7 @@ def compute_score(pd_bad, score_params):
 
 
 def calibrate_pd(pd_raw, calibrator):
+    """Aplica calibración isotónica si está disponible"""
     pd_raw = float(np.clip(pd_raw, 1e-6, 1 - 1e-6))
     if calibrator is None:
         return pd_raw
@@ -386,16 +324,12 @@ def calibrate_pd(pd_raw, calibrator):
     try:
         x_thr = getattr(calibrator, "X_thresholds_", None)
         if x_thr is not None and len(x_thr) > 1:
-            # Si cae fuera del rango aprendido por la calibración isotónica,
-            # evitamos clip constante y usamos la PD cruda del modelo.
             if pd_raw < float(x_thr[0]) or pd_raw > float(x_thr[-1]):
                 return pd_raw
 
         pd_cal = float(calibrator.transform([pd_raw])[0])
         pd_cal = float(np.clip(pd_cal, 1e-6, 1 - 1e-6))
 
-        # Si la calibración colapsa demasiado cerca de cero, usamos la PD cruda.
-        # Esto evita que todos los casos terminen con el mismo valor.
         if pd_cal <= 1e-5 and pd_raw > pd_cal:
             return pd_raw
 
@@ -405,6 +339,7 @@ def calibrate_pd(pd_raw, calibrator):
 
 
 def encode_input(user_input, feature_names, label_encoders):
+    """Codifica entrada del usuario para el modelo"""
     row = {}
 
     for col in feature_names:
@@ -429,10 +364,9 @@ def encode_input(user_input, feature_names, label_encoders):
 
 
 def harmonize_user_input(user_input, mode, feature_names):
+    """Ajusta valores relacionados (ej. funded_amnt = loan_amnt)"""
     data = user_input.copy()
 
-    # En modo básico, al no exponer todas las variables, forzamos consistencia
-    # entre montos fuertemente relacionados para evitar perfiles incoherentes.
     if mode == "Basico (normal, recomendado)":
         if "loan_amnt" in data:
             loan_amt = float(data["loan_amnt"])
@@ -445,6 +379,7 @@ def harmonize_user_input(user_input, mode, feature_names):
 
 
 def render_numeric_inputs(feature_list, defaults, values_store, key_prefix, n_cols=3):
+    """Renderiza campos numéricos en columnas"""
     cols = st.columns(n_cols)
     for idx, col in enumerate(feature_list):
         with cols[idx % n_cols]:
@@ -471,6 +406,7 @@ def render_numeric_inputs(feature_list, defaults, values_store, key_prefix, n_co
 
 
 def render_categorical_inputs(feature_list, defaults, values_store, label_encoders, key_prefix, n_cols=3):
+    """Renderiza campos categóricos en columnas"""
     cols = st.columns(n_cols)
     for idx, col in enumerate(feature_list):
         classes = label_encoders[col].classes_.tolist()
@@ -488,32 +424,30 @@ def render_categorical_inputs(feature_list, defaults, values_store, label_encode
 
 
 def main():
-    st.title("Credit Risk Scorecard")
+    st.title(" Credit Risk Scorecard")
     st.write("Aplicación para estimar probabilidad de incumplimiento, score crediticio y comparación contra la población.")
 
     st.sidebar.header("Entregables")
     st.sidebar.markdown(f"[Reporte técnico]({TECH_REPORT_URL})")
     st.sidebar.markdown(f"[Material publicitario]({MARKETING_MATERIAL_URL})")
     
+    st.sidebar.markdown("---")
+    
 
-    artifact_version = (
-        file_mtime("modelo_nn_credit_risk.h5"),
-        file_mtime("scaler_nn.pkl"),
-        file_mtime("label_encoders_nn.pkl"),
-        file_mtime("feature_names_nn.pkl"),
-        file_mtime("scorecard_params.pkl"),
-        file_mtime("pd_calibrator.pkl"),
-    )
-    population_version = (
-        file_mtime("scorecard_poblacion.csv"),
-        file_mtime("scorecard_resumen_deciles.csv"),
-        file_mtime("analisis_variables_riesgo.csv"),
-    )
-    loan_version = file_mtime("loan/loan.csv")
+    # Carga de artefactos (SIN DEPENDENCIA DE loan.csv)
+    try:
+        model, scaler, label_encoders, feature_names, score_params, calibrator = load_artifacts()
+        score_pop, score_deciles, risk_analysis = load_population_data()
+        defaults = load_reference_defaults()
+        demo_cases = load_demo_profiles()
+    except FileNotFoundError as e:
+        st.error(str(e))
+        st.stop()
+    except Exception as e:
+        st.error(f"Error al cargar los archivos del modelo: {str(e)}")
+        st.stop()
 
-    model, scaler, label_encoders, feature_names, score_params, calibrator = load_artifacts(artifact_version)
-    score_pop, score_deciles, risk_analysis = load_population_data(population_version)
-
+    # Preparación de dataframes para visualización
     score_deciles_view = score_deciles.rename(
         columns={
             "score_decile": "Decil",
@@ -548,24 +482,17 @@ def main():
 
     cat_features = list(label_encoders.keys())
     numeric_features = [c for c in feature_names if c not in cat_features]
-    defaults = build_reference_values(feature_names, cat_features, loan_version)
+    
     scoring_defaults = defaults.copy()
     display_defaults = defaults.copy()
     for col in numeric_features:
         display_defaults[col] = 0
 
-    demo_cases = build_full_demo_profiles(
-        feature_names,
-        cat_features,
-        defaults,
-        loan_version,
-        file_mtime("scorecard_poblacion.csv"),
-    )
-
     core_numeric = [
         c for c in [
             "annual_inc", "loan_amnt", "int_rate", "dti", "installment",
             "open_acc", "revol_util", "total_acc", "inq_last_6mths",
+            "fico_range_low", "delinq_2yrs"
         ] if c in numeric_features
     ]
     core_categorical = [
@@ -580,153 +507,150 @@ def main():
         st.subheader("Datos de entrada")
         st.caption("Modo Básico: completa solo variables clave. El resto usa valores típicos de la población.")
 
-        demo_choice = st.selectbox(
-            "Casos de prueba",
-            ["Ninguno"] + list(demo_cases.keys()),
-            index=0,
-            key="demo_choice",
-        )
-        if st.button("Cargar caso de prueba"):
-            widget_profile_basic = build_widget_profile(
-                st.session_state.demo_choice,
-                "Basico (normal, recomendado)",
-                demo_cases,
-                defaults,
-                core_numeric,
-                core_categorical,
-                numeric_features,
-                cat_features,
+        # Selector de casos de prueba
+        col_demo_1, col_demo_2 = st.columns([3, 1])
+        with col_demo_1:
+            demo_options = ["Ninguno"] + list(demo_cases.keys())
+            demo_choice = st.selectbox(
+                "Casos de prueba predefinidos",
+                demo_options,
+                index=0,
+                key="demo_choice",
             )
-            widget_profile_adv = build_widget_profile(
-                st.session_state.demo_choice,
-                "Avanzado",
-                demo_cases,
-                defaults,
-                core_numeric,
-                core_categorical,
-                numeric_features,
-                cat_features,
-            )
-            st.session_state.demo_profile = demo_cases.get(st.session_state.demo_choice, {})
-            for key, value in {**widget_profile_basic, **widget_profile_adv}.items():
-                st.session_state[key] = value
-            st.rerun()
+        
+        with col_demo_2:
+            st.write("")
+            st.write("")
+            if st.button(" Limpiar campos", use_container_width=True):
+                for key in list(st.session_state.keys()):
+                    if key.startswith(("basic_num_", "basic_cat_", "adv_num_", "adv_cat_")):
+                        del st.session_state[key]
+                st.session_state.demo_choice = "Ninguno"
+                st.rerun()
 
-        if st.button("Limpiar caso de prueba"):
-            st.session_state.demo_profile = {}
+        if demo_choice != "Ninguno" and st.button(" Cargar caso seleccionado", use_container_width=True):
+            selected_profile = demo_cases[demo_choice]
             for col in numeric_features:
-                st.session_state.pop(f"adv_num_{col}", None)
-            for col in core_numeric:
-                st.session_state.pop(f"basic_num_{col}", None)
-                st.session_state.pop(f"adv_num_{col}", None)
-            for col in core_categorical:
-                st.session_state.pop(f"basic_cat_{col}", None)
-                st.session_state.pop(f"adv_cat_{col}", None)
+                st.session_state[f"adv_num_{col}"] = selected_profile.get(col, defaults[col])
+                if col in core_numeric:
+                    st.session_state[f"basic_num_{col}"] = selected_profile.get(col, defaults[col])
             for col in cat_features:
-                st.session_state.pop(f"adv_cat_{col}", None)
+                st.session_state[f"adv_cat_{col}"] = selected_profile.get(col, defaults[col])
+                if col in core_categorical:
+                    st.session_state[f"basic_cat_{col}"] = selected_profile.get(col, defaults[col])
             st.rerun()
 
         mode = st.radio(
-            "Modo de captura",
+            " Modo de captura",
             ["Basico (normal, recomendado)", "Avanzado"],
             horizontal=True,
             key="capture_mode",
         )
         st.caption(
-            "Básico (normal): pides solo variables clave y el resto toma valores típicos. "
-            "Avanzado: pides todas las variables del modelo."
-        )
-        st.caption(
-            "En ambos modos, el cálculo final usa el mismo modelo; la diferencia está en cuántas variables completa el usuario y cuántas toma como referencia."
+            "**Básico**: solo variables clave, resto con valores de referencia. "
+            "**Avanzado**: control total sobre todas las variables del modelo."
         )
 
         with st.form("prediction_form"):
             user_input = scoring_defaults.copy()
-            if "demo_profile" in st.session_state and st.session_state.demo_profile:
-                user_input.update(st.session_state.demo_profile)
 
             if mode == "Basico (normal, recomendado)":
-                st.info("En este modo solo editas variables clave. Las demás variables se completan automáticamente con valores de referencia.")
-                st.markdown("### Variables numéricas clave")
+                st.info(" Modo básico: edita solo las variables más importantes.")
+                st.markdown("#### Variables numéricas clave")
                 render_numeric_inputs(core_numeric, display_defaults, user_input, key_prefix="basic_num", n_cols=3)
 
-                st.markdown("### Variables categóricas clave")
+                st.markdown("#### Variables categóricas clave")
                 render_categorical_inputs(core_categorical, display_defaults, user_input, label_encoders, key_prefix="basic_cat", n_cols=3)
             else:
-                st.info("Modo avanzado activo: puedes editar todas las variables que usa el modelo.")
-                st.markdown("### Variables numéricas")
+                st.info(" Modo avanzado: puedes editar todas las variables del modelo.")
+                st.markdown("#### Variables numéricas")
                 render_numeric_inputs(numeric_features, display_defaults, user_input, key_prefix="adv_num", n_cols=3)
 
-                st.markdown("### Variables categóricas")
+                st.markdown("#### Variables categóricas")
                 render_categorical_inputs(cat_features, display_defaults, user_input, label_encoders, key_prefix="adv_cat", n_cols=3)
 
-            submitted = st.form_submit_button("Calcular score")
+            submitted = st.form_submit_button("Calcular score", use_container_width=True)
 
         if submitted:
-            user_input_consistent = harmonize_user_input(user_input, mode, feature_names)
-            x_input = encode_input(user_input_consistent, feature_names, label_encoders)
-            x_scaled = scaler.transform(x_input)
-            pd_raw = float(model.predict(x_scaled, verbose=0).flatten()[0])
-            pd_bad = calibrate_pd(pd_raw, calibrator)
-            score = compute_score(pd_bad, score_params)
+            with st.spinner("Calculando probabilidad de incumplimiento..."):
+                user_input_consistent = harmonize_user_input(user_input, mode, feature_names)
+                x_input = encode_input(user_input_consistent, feature_names, label_encoders)
+                x_scaled = scaler.transform(x_input)
+                pd_raw = float(model.predict(x_scaled, verbose=0).flatten()[0])
+                pd_bad = calibrate_pd(pd_raw, calibrator)
+                score = compute_score(pd_bad, score_params)
 
-            score_percentile = float((score_pop["score"] <= score).mean() * 100)
-            pd_percentile = float((score_pop["pd_bad"] <= pd_bad).mean() * 100)
+                score_percentile = float((score_pop["score"] <= score).mean() * 100)
+                pd_percentile = float((score_pop["pd_bad"] <= pd_bad).mean() * 100)
 
-            st.subheader("Resultado")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("PD (prob. incumplimiento)", f"{pd_bad:.2%}")
-            c2.metric("Score", f"{score:.1f}")
-            c3.metric("Percentil de score", f"{score_percentile:.1f}")
+            st.subheader("Resultado de la evaluación")
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Prob. Incumplimiento", f"{pd_bad:.2%}")
+            c2.metric("Score Crediticio", f"{score:.0f}")
+            c3.metric("Percentil (Score)", f"{score_percentile:.1f}%")
+            c4.metric("Percentil (Riesgo)", f"{pd_percentile:.1f}%")
 
-            st.markdown(
-                """
-                **Cómo leer este resultado**
-                - **PD**: probabilidad estimada de incumplir. Mientras más alta, más riesgoso es el perfil.
-                - **Score**: número resumido del riesgo. Mientras más alto, mejor comportamiento esperado.
-                - **Percentil de score**: tu posición frente a la población por score. Un valor alto significa que tu score está por encima de la mayoría.
-                - **Percentil por PD**: tu posición frente a la población por probabilidad de incumplimiento. Un valor alto significa más riesgo.
-                """
-            )
-
-            # Banda de riesgo relativa a la población (más robusta que umbral fijo de PD)
+            # Clasificación de riesgo
             if pd_percentile >= 70:
-                band = "Alto riesgo"
+                band = " Alto riesgo"
+                color = "red"
             elif pd_percentile >= 30:
-                band = "Riesgo medio"
+                band = " Riesgo medio"
+                color = "orange"
             else:
                 band = "Bajo riesgo"
+                color = "green"
+            
+            st.markdown(f"### Clasificación: :{color}[{band}]")
+            
+            with st.expander("ℹ¿Cómo interpretar estos resultados?"):
+                st.markdown("""
+                - **PD (Probability of Default)**: Probabilidad estimada de que el cliente incumpla con el pago.
+                - **Score**: Número que resume el riesgo crediticio. A mayor score, menor riesgo.
+                - **Percentil (Score)**: Posición relativa al score. 90% significa que tu score es mejor que el 90% de la población.
+                - **Percentil (Riesgo)**: Posición relativa al riesgo. 10% significa que solo el 10% de la población tiene menos riesgo que tú.
+                """)
 
-            st.info(f"Clasificación estimada: {band}")
-            st.caption(f"Percentil por PD (más alto = más riesgoso): {pd_percentile:.1f}")
-
-            st.markdown("### Tu posición vs población (distribución de score)")
-            hist = alt.Chart(score_pop).mark_bar(opacity=0.55).encode(
-                x=alt.X("score:Q", bin=alt.Bin(maxbins=40), title="Score"),
-                y=alt.Y("count():Q", title="Frecuencia"),
+            st.markdown("---")
+            st.markdown("### Tu posición vs población de referencia")
+            
+            hist = alt.Chart(score_pop).mark_bar(opacity=0.6, color='steelblue').encode(
+                x=alt.X("score:Q", bin=alt.Bin(maxbins=40), title="Score Crediticio"),
+                y=alt.Y("count():Q", title="Número de clientes"),
             )
-            mark_user = alt.Chart(pd.DataFrame({"score": [score]})).mark_rule(color="red", size=3).encode(
+            mark_user = alt.Chart(pd.DataFrame({"score": [score]})).mark_rule(color="red", size=3, strokeDash=[5, 5]).encode(
                 x="score:Q"
             )
-            st.altair_chart((hist + mark_user).properties(height=320), use_container_width=True)
+            
+            chart = (hist + mark_user).properties(height=350, title="Distribución de scores en la población")
+            st.altair_chart(chart, use_container_width=True)
 
-        st.subheader("Comparación por deciles")
-        st.caption(
-            "La población se divide en 10 grupos según el score. El decil 9 concentra los mejores scores y el decil 0 los peores. "
-            "Si tu score cae en un decil bajo, tu perfil es más riesgoso que la mayoría de la población."
-        )
-        st.dataframe(score_deciles_view, use_container_width=True)
+        st.markdown("---")
+        st.subheader("Tabla de deciles de referencia")
+        st.caption("La población se divide en 10 grupos según su score. Decil 9 = mejores scores, Decil 0 = peores scores.")
+        st.dataframe(score_deciles_view, use_container_width=True, hide_index=True)
 
     with tab_target:
         st.subheader("Reglas de construcción de la variable objetivo")
-        st.write("El modelo predice probabilidad de ser cliente malo (target = 1).")
-        st.dataframe(target_mapping_view, use_container_width=True)
-        st.warning("Los casos con target = NA se excluyen del entrenamiento para evitar ruido en la etiqueta.")
+        st.write("El modelo predice la probabilidad de que un cliente sea considerado 'malo' (target = 1).")
+        st.dataframe(target_mapping_view, use_container_width=True, hide_index=True)
+        st.warning("Los casos con target = 'NA' se excluyen del entrenamiento para evitar etiquetado incorrecto.")
 
     with tab_model:
-        st.subheader("Variables más riesgosas del modelo")
-        st.caption("Ordenadas por caída de AUC al permutar la variable (mayor caída = mayor relevancia).")
-        st.dataframe(risk_analysis_view.head(20), use_container_width=True)
+        st.subheader("Variables más influyentes en el riesgo")
+        st.caption("Ordenadas por importancia (caída en AUC al permutar la variable)")
+        st.dataframe(risk_analysis_view.head(20), use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.markdown("### Interpretación de variables clave")
+        st.markdown("""
+        - **A mayor DTI (debt-to-income)**: Mayor riesgo de incumplimiento.
+        - **A mayor FICO**: Menor riesgo de incumplimiento.
+        - **Préstamos a 60 meses**: Más riesgosos que a 36 meses.
+        - **Propósito 'debt_consolidation'**: Suele tener mayor riesgo que 'credit_card'.
+        - **Grado A o B**: Menor riesgo que grados D, E, F o G.
+        """)
 
 
 if __name__ == "__main__":
