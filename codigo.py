@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import roc_auc_score, roc_curve, classification_report, brier_score_loss, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, regularizers
@@ -152,6 +153,20 @@ class_weight_dict = {int(c): float(w) for c, w in zip(classes, class_weights_arr
 print(f"[INFO] Class weights: {class_weight_dict}")
 
 # ---------------------------
+# 6.5. MODELO BASE DE REFERENCIA (REGRESIÓN LOGÍSTICA)
+# ---------------------------
+print("\n[TRAIN] Entrenando modelo de baja complejidad (Regresión Logística)...")
+lr_model = LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')
+lr_model.fit(X_train_scaled, y_train)
+
+y_test_pred_proba_lr = lr_model.predict_proba(X_test_scaled)[:, 1]
+auc_score_lr = roc_auc_score(y_test, y_test_pred_proba_lr)
+brier_lr = brier_score_loss(y_test, y_test_pred_proba_lr)
+
+print(f"[RESULT] Regresión Logística - AUC en Test: {auc_score_lr:.4f}")
+print(f"[RESULT] Regresión Logística - Brier score: {brier_lr:.4f}")
+
+# ---------------------------
 # 7. OPTIMIZACIÓN DE RED NEURONAL
 # ---------------------------
 def build_model(hp):
@@ -250,8 +265,11 @@ print(classification_report(y_test, y_pred_label, digits=4))
 
 # Gráfica ROC
 fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+fpr_lr, tpr_lr, _ = roc_curve(y_test, y_test_pred_proba_lr)
+
 plt.figure(figsize=(8,6))
 plt.plot(fpr, tpr, label=f'RNA (AUC = {auc_score:.3f})')
+plt.plot(fpr_lr, tpr_lr, label=f'Regresión Logística (AUC = {auc_score_lr:.3f})', color='darkorange', linestyle='--')
 plt.plot([0, 1], [0, 1], 'k--')
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive Rate')
