@@ -692,7 +692,7 @@ def main():
             # Banda de riesgo relativa a la población (más robusta que umbral fijo de PD)
             if pd_percentile >= 70:
                 band = "Alto riesgo"
-            elif pd_percentile >= 40:
+            elif pd_percentile >= 30:
                 band = "Riesgo medio"
             else:
                 band = "Bajo riesgo"
