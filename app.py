@@ -9,7 +9,7 @@ from pathlib import Path
 st.set_page_config(page_title="Credit Risk Scorecard", layout="wide")
 
 # Reemplaza estos enlaces con tus URLs finales de entrega
-TECH_REPORT_URL = "https://example.com/reporte-tecnico"
+TECH_REPORT_URL = "https://www.notion.so/Modelaci-n-de-Riesgo-de-Cr-dito-con-Red-Neuronal-Calibrada-y-Score-Derivado-349959feddc6809ba530c5abd1ba1801"
 MARKETING_MATERIAL_URL = "https://example.com/material-publicitario"
 
 TARGET_MAPPING = [
