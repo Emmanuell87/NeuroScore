@@ -9,7 +9,7 @@ from pathlib import Path
 st.set_page_config(page_title="Credit Risk Scorecard", layout="wide")
 
 # Reemplaza estos enlaces con tus URLs finales de entrega
-TECH_REPORT_URL = "https://www.notion.so/Modelaci-n-de-Riesgo-de-Cr-dito-con-Red-Neuronal-Calibrada-y-Score-Derivado-349959feddc6809ba530c5abd1ba1801"
+TECH_REPORT_URL = "https://example.com/reporte-tecnico"
 MARKETING_MATERIAL_URL = "https://example.com/material-publicitario"
 
 TARGET_MAPPING = [
@@ -236,7 +236,7 @@ def load_reference_defaults():
     if defaults_path.exists():
         return joblib.load(defaults_path)
     raise FileNotFoundError(
-        "❌ reference_defaults.pkl no encontrado.\n\n"
+        " reference_defaults.pkl no encontrado.\n\n"
         "Este archivo es OBLIGATORIO para la app.\n"
         "Ejecuta primero 'codigo.py' para generar este archivo.\n"
         "No necesitas el archivo loan.csv para desplegar la app."
@@ -517,16 +517,6 @@ def main():
                 index=0,
                 key="demo_choice",
             )
-        
-        with col_demo_2:
-            st.write("")
-            st.write("")
-            if st.button(" Limpiar campos", use_container_width=True):
-                for key in list(st.session_state.keys()):
-                    if key.startswith(("basic_num_", "basic_cat_", "adv_num_", "adv_cat_")):
-                        del st.session_state[key]
-                st.session_state.demo_choice = "Ninguno"
-                st.rerun()
 
         if demo_choice != "Ninguno" and st.button(" Cargar caso seleccionado", use_container_width=True):
             selected_profile = demo_cases[demo_choice]
@@ -595,7 +585,7 @@ def main():
             if pd_percentile >= 70:
                 band = " Alto riesgo"
                 color = "red"
-            elif pd_percentile >= 25:
+            elif pd_percentile >= 30:
                 band = " Riesgo medio"
                 color = "orange"
             else:

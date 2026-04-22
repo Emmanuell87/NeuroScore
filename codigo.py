@@ -1,12 +1,10 @@
-# ==============================================
-# PUNTO 1 (VERSIÓN CORREGIDA PARA TUS 85 VARIABLES)
-# MODELO DE PROBABILIDAD DE INCUMPLIMIENTO CON RNA OPTIMIZADA
+# ==============================================L 
+# Entrena modelo de riesgo crediticio con RNA
 # ==============================================
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import roc_auc_score, roc_curve, classification_report, brier_score_loss, f1_score
@@ -18,6 +16,7 @@ from tensorflow.keras import layers, regularizers
 import keras_tuner as kt
 import warnings
 import joblib
+import os
 
 warnings.filterwarnings('ignore')
 tf.random.set_seed(42)
@@ -26,12 +25,12 @@ np.random.seed(42)
 # ---------------------------
 # 1. CARGA DE DATOS
 # ---------------------------
-print("[INFO] Cargando 'loan.csv'...")
+print("[INFO] Cargando 'loan/loan.csv'...")
 df = pd.read_csv('loan/loan.csv', low_memory=False)
 print(f"Dataset original: {df.shape}")
 
 # ---------------------------
-# 2. DEFINICIÓN DE VARIABLES SEGÚN TU LISTA EXACTA
+# 2. DEFINICIÓN DE VARIABLES
 # ---------------------------
 
 # 2.1. Variables que son FUGA DE INFORMACIÓN (Leakage) - SE ELIMINAN
@@ -50,20 +49,18 @@ cols_metadata = [
 ]
 
 # 2.3. Variables CATEGÓRICAS que SÍ usaremos
-# (Ajusta esta lista si quieres excluir alguna. addr_state es debatible, yo la incluyo)
 cat_features = [
     'addr_state', 'application_type', 'emp_length', 'grade', 
     'home_ownership', 'initial_list_status', 'is_inc_v', 'purpose', 
     'pymnt_plan', 'sub_grade', 'term', 'verified_status_joint'
 ]
 
-# 2.4. Variables NUMÉRICAS que SÍ usaremos (El resto de las 85 menos las de arriba)
-# Nota: Las listaremos manualmente para asegurar que no se nos cuela ninguna leakage.
+# 2.4. Variables NUMÉRICAS que SÍ usaremos
 num_features = [
     'annual_inc', 'annual_inc_joint', 'collections_12_mths_ex_med', 'delinq_2yrs',
     'dti', 'dti_joint', 'fico_range_high', 'fico_range_low', 'funded_amnt',
     'funded_amnt_inv', 'inq_last_6mths', 'installment', 'int_rate',
-    'loan_amnt',
+    'loan_amnt', 'last_fico_range_high', 'last_fico_range_low',
     'mths_since_last_delinq', 'mths_since_last_major_derog', 'mths_since_last_record',
     'open_acc', 'pub_rec', 'revol_bal', 'revol_util', 'total_acc',
     'open_acc_6m', 'open_il_6m', 'open_il_12m', 'open_il_24m', 'mths_since_rcnt_il',
@@ -72,7 +69,7 @@ num_features = [
     'acc_now_delinq', 'tot_coll_amt', 'tot_cur_bal'
 ]
 
-# 2.5. Asegurar que solo usamos columnas que existen en el DataFrame cargado
+# 2.5. Asegurar que solo usamos columnas que existen
 cols_to_drop = cols_leakage + cols_metadata
 cols_to_drop = [c for c in cols_to_drop if c in df.columns]
 df_filtered = df.drop(columns=cols_to_drop, errors='ignore')
@@ -84,10 +81,8 @@ print(f"[OK] Variables categóricas seleccionadas: {len(cat_features)}")
 print(f"[OK] Variables numéricas seleccionadas: {len(num_features)}")
 
 # ---------------------------
-# 3. DEFINICIÓN DEL TARGET (loan_status)
+# 3. DEFINICIÓN DEL TARGET
 # ---------------------------
-# Mapeo recomendado del reto:
-# 0 = bueno (pagador), 1 = malo (incumple), NA = estado sin desenlace definitivo
 status_to_target = {
     'Fully Paid': 0,
     'Does not meet the credit policy. Status:Fully Paid': 0,
@@ -111,12 +106,10 @@ print(f"[SHAPE] Tamaño del dataset utilizable: {df_filtered.shape}")
 # ---------------------------
 # 4. LIMPIEZA Y PREPROCESAMIENTO
 # ---------------------------
-# Variables Numéricas: Llenar NaN con Mediana y convertir a float
 for col in num_features:
     df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
     df_filtered[col] = df_filtered[col].fillna(df_filtered[col].median())
 
-# Variables Categóricas: Llenar NaN con 'Missing' y aplicar LabelEncoder
 label_encoders = {}
 for col in cat_features:
     df_filtered[col] = df_filtered[col].fillna('Missing')
@@ -130,7 +123,6 @@ for col in cat_features:
 X = df_filtered[num_features + cat_features]
 y = df_filtered['target']
 
-# Eliminar filas con infinitos (por si acaso)
 X = X.replace([np.inf, -np.inf], np.nan).dropna()
 y = y.loc[X.index]
 
@@ -146,7 +138,6 @@ X_train, X_val, y_train, y_val = train_test_split(
     X_train_full, y_train_full, test_size=0.25, random_state=42, stratify=y_train_full
 )
 
-# Escalado (Esencial para Redes Neuronales)
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_val_scaled = scaler.transform(X_val)
@@ -154,20 +145,19 @@ X_test_scaled = scaler.transform(X_test)
 
 print(f"Entrenamiento: {X_train_scaled.shape}, Validación: {X_val_scaled.shape}, Test: {X_test_scaled.shape}")
 
-# Ponderación de clases para reducir sesgo por desbalance
+# Ponderación de clases
 classes = np.array([0, 1])
 class_weights_array = compute_class_weight(class_weight='balanced', classes=classes, y=y_train)
 class_weight_dict = {int(c): float(w) for c, w in zip(classes, class_weights_array)}
 print(f"[INFO] Class weights: {class_weight_dict}")
 
 # ---------------------------
-# 7. OPTIMIZACIÓN DE RED NEURONAL CON KERAS TUNER
+# 7. OPTIMIZACIÓN DE RED NEURONAL
 # ---------------------------
 def build_model(hp):
     model = keras.Sequential()
     model.add(layers.Input(shape=(X_train_scaled.shape[1],)))
     
-    # Hiperparámetros a optimizar
     for i in range(hp.Int('num_layers', 1, 4)):
         model.add(layers.Dense(
             units=hp.Int(f'units_{i}', min_value=32, max_value=256, step=32),
@@ -186,7 +176,6 @@ def build_model(hp):
     )
     return model
 
-# Inicializar Tuner
 tuner = kt.Hyperband(
     build_model,
     objective=kt.Objective('val_auc', direction='max'),
@@ -198,7 +187,7 @@ tuner = kt.Hyperband(
 
 stop_early = keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 
-print("\n[SEARCH] Iniciando búsqueda de arquitectura óptima... (Puede tardar varios minutos)")
+print("\n[SEARCH] Iniciando búsqueda de arquitectura óptima...")
 tuner.search(
     X_train_scaled, y_train,
     validation_data=(X_val_scaled, y_val),
@@ -210,12 +199,12 @@ tuner.search(
 )
 
 # ---------------------------
-# 8. ENTRENAMIENTO FINAL Y EVALUACIÓN
+# 8. ENTRENAMIENTO FINAL
 # ---------------------------
 best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
 model = tuner.hypermodel.build(best_hps)
 
-print("\n[TRAIN] Entrenando modelo final con la mejor arquitectura...")
+print("\n[TRAIN] Entrenando modelo final...")
 history = model.fit(
     X_train_scaled, y_train,
     validation_data=(X_val_scaled, y_val),
@@ -226,24 +215,23 @@ history = model.fit(
     verbose=1
 )
 
-# Calibración de probabilidad (PD) con set de validación
+# Calibración
 y_val_raw = model.predict(X_val_scaled, verbose=0).flatten()
 y_val_raw = np.clip(y_val_raw, 1e-6, 1 - 1e-6)
-
 calibrator = IsotonicRegression(out_of_bounds='clip')
 calibrator.fit(y_val_raw, y_val)
 
-# Evaluación en test con PD calibrada
+# Evaluación
 y_test_raw = model.predict(X_test_scaled, verbose=0).flatten()
 y_test_raw = np.clip(y_test_raw, 1e-6, 1 - 1e-6)
 y_pred_proba = np.clip(calibrator.transform(y_test_raw), 1e-6, 1 - 1e-6)
 
 auc_score = roc_auc_score(y_test, y_pred_proba)
 brier = brier_score_loss(y_test, y_pred_proba)
-print(f"\n[RESULT] AUC en Test (PD calibrada): {auc_score:.4f}")
-print(f"[RESULT] Brier score en Test (PD calibrada): {brier:.4f}")
+print(f"\n[RESULT] AUC en Test: {auc_score:.4f}")
+print(f"[RESULT] Brier score: {brier:.4f}")
 
-# Umbral optimizado por F1 en validación
+# Umbral óptimo
 y_val_cal = np.clip(calibrator.transform(y_val_raw), 1e-6, 1 - 1e-6)
 candidate_thresholds = np.linspace(0.05, 0.95, 37)
 best_thr = 0.50
@@ -253,9 +241,9 @@ for thr in candidate_thresholds:
     if f1 > best_f1:
         best_f1 = f1
         best_thr = float(thr)
-print(f"[RESULT] Umbral seleccionado por F1 (validación): {best_thr:.2f}")
+print(f"[RESULT] Umbral óptimo F1: {best_thr:.2f}")
 
-# Reporte de clasificación con umbral optimizado
+# Reporte
 y_pred_label = (y_pred_proba >= best_thr).astype(int)
 print(f"\n[REPORT] Classification report (threshold={best_thr:.2f}):")
 print(classification_report(y_test, y_pred_label, digits=4))
@@ -270,16 +258,15 @@ plt.ylabel('True Positive Rate')
 plt.title('Curva ROC - Modelo de Incumplimiento')
 plt.legend()
 plt.grid(True)
+plt.savefig('Figure_1.png', dpi=150, bbox_inches='tight')
 plt.show()
 
 # ---------------------------
-# 9. SCORECARD DEL MODELO (PUNTO 2)
+# 9. SCORECARD
 # ---------------------------
-# Convertimos PD (probabilidad de incumplimiento) a score.
-# Mayor score = menor riesgo.
 PDO = 50
 SCORE_AT_ODDS = 600
-ODDS_REF = 20  # odds buenos:malos en punto de referencia
+ODDS_REF = 20
 
 B = PDO / np.log(2)
 A = SCORE_AT_ODDS - B * np.log(ODDS_REF)
@@ -295,10 +282,8 @@ scorecard_df = pd.DataFrame({
     'pd_bad': pd_all,
     'score': score_all,
     'target': y.values,
-    'source_index': X.index.values,
 })
 
-# Resumen tipo scorecard por deciles
 scorecard_df['score_decile'] = pd.qcut(scorecard_df['score'], q=10, labels=False, duplicates='drop')
 scorecard_summary = (
     scorecard_df
@@ -314,17 +299,12 @@ scorecard_summary = (
     .sort_values('score_decile', ascending=False)
 )
 
-print("\n[SCORECARD] Resumen por deciles de score (1er filas):")
-print(scorecard_summary.head(10).to_string(index=False))
-
-# Posición relativa de la población para comparar en app (percentiles)
-scorecard_df['percentil_poblacion'] = scorecard_df['score'].rank(pct=True) * 100
+print("\n[SCORECARD] Resumen por deciles:")
+print(scorecard_summary.to_string(index=False))
 
 # ---------------------------
-# 10. VARIABLES MAS RIESGOSAS (PUNTO 3)
+# 10. ANÁLISIS DE RIESGO
 # ---------------------------
-# Analisis basado en importancia por permutacion (caida de AUC al desordenar cada variable)
-# y direccion del riesgo (correlacion con PD predicha).
 max_eval = 15000
 if len(X_test) > max_eval:
     eval_idx = X_test.sample(n=max_eval, random_state=42).index
@@ -336,53 +316,43 @@ else:
 
 X_eval_scaled = scaler.transform(X_eval_df)
 y_eval_raw = model.predict(X_eval_scaled, verbose=0).flatten()
-y_eval_raw = np.clip(y_eval_raw, 1e-6, 1 - 1e-6)
 y_eval_pred = np.clip(calibrator.transform(y_eval_raw), 1e-6, 1 - 1e-6)
 baseline_auc_eval = roc_auc_score(y_eval, y_eval_pred)
 
 rng = np.random.default_rng(42)
 risk_rows = []
 
+print("\n[RISK] Analizando importancia de variables...")
 for i, col in enumerate(X.columns):
+    if (i + 1) % 10 == 0:
+        print(f"  Procesando variable {i+1}/{len(X.columns)}: {col}")
+    
     X_perm = X_eval_scaled.copy()
     X_perm[:, i] = rng.permutation(X_perm[:, i])
     y_perm_raw = model.predict(X_perm, verbose=0).flatten()
-    y_perm_raw = np.clip(y_perm_raw, 1e-6, 1 - 1e-6)
     y_perm_pred = np.clip(calibrator.transform(y_perm_raw), 1e-6, 1 - 1e-6)
-    auc_perm = roc_auc_score(y_eval, y_perm_pred)
-    auc_drop = baseline_auc_eval - auc_perm
-
+    auc_drop = baseline_auc_eval - roc_auc_score(y_eval, y_perm_pred)
+    
     col_values = X_eval_df[col].values
-    if np.std(col_values) == 0:
-        corr_with_pd = 0.0
-    else:
-        corr_with_pd = float(np.corrcoef(col_values, y_eval_pred)[0, 1])
-        if np.isnan(corr_with_pd):
-            corr_with_pd = 0.0
-
-    if corr_with_pd > 0:
-        risk_direction = 'A mayor valor, mayor riesgo'
-    elif corr_with_pd < 0:
-        risk_direction = 'A mayor valor, menor riesgo'
-    else:
-        risk_direction = 'Sin relacion lineal clara'
-
+    corr_with_pd = float(np.corrcoef(col_values, y_eval_pred)[0, 1]) if np.std(col_values) > 0 else 0.0
+    
     risk_rows.append({
         'variable': col,
         'auc_drop_permutacion': auc_drop,
         'corr_con_pd': corr_with_pd,
-        'direccion_riesgo': risk_direction,
+        'direccion_riesgo': 'A mayor valor, mayor riesgo' if corr_with_pd > 0 else 'A mayor valor, menor riesgo' if corr_with_pd < 0 else 'Sin relacion lineal clara'
     })
 
 risk_analysis_df = pd.DataFrame(risk_rows).sort_values('auc_drop_permutacion', ascending=False)
 
-print("\n[RISK] Top 15 variables mas influyentes en riesgo (AUC drop):")
+print("\n[RISK] Top 15 variables más influyentes:")
 print(risk_analysis_df.head(15).to_string(index=False))
-print("\n[RISK] Nota: En variables categoricas codificadas con LabelEncoder, la direccion debe interpretarse con cautela.")
 
 # ---------------------------
-# 11. GUARDADO DE COMPONENTES (Para Scorecard y App)
+# 11. GUARDADO DE COMPONENTES BÁSICOS
 # ---------------------------
+print("\n[SAVE] Guardando componentes...")
+
 joblib.dump(scaler, 'scaler_nn.pkl')
 joblib.dump(label_encoders, 'label_encoders_nn.pkl')
 joblib.dump(list(X.columns), 'feature_names_nn.pkl')
@@ -395,4 +365,60 @@ risk_analysis_df.to_csv('analisis_variables_riesgo.csv', index=False)
 
 model.save('modelo_nn_credit_risk.h5')
 
-print("[SAVED] Componentes guardados: modelo, scaler, encoders, features, scorecard y analisis de riesgo")
+print("[SAVED] Componentes básicos guardados")
+
+# ---------------------------
+# 12. reference_defaults.pkl
+# ---------------------------
+print("\n[12] Generando reference_defaults.pkl...")
+
+reference_defaults = {}
+
+for col in num_features:
+    if col in X.columns:
+        reference_defaults[col] = float(df_filtered[col].median())
+
+for col in cat_features:
+    if col in df_filtered.columns:
+        mode_series = df[col].mode()
+        if not mode_series.empty:
+            mode_val = mode_series.iloc[0]
+            if pd.isna(mode_val) or str(mode_val) == 'Missing':
+                reference_defaults[col] = label_encoders[col].classes_[0]
+            else:
+                reference_defaults[col] = mode_val
+        else:
+            reference_defaults[col] = label_encoders[col].classes_[0]
+
+joblib.dump(reference_defaults, 'reference_defaults.pkl')
+print(f" reference_defaults.pkl generado con {len(reference_defaults)} variables")
+
+# ---------------------------
+# 13. RESUMEN FINAL
+# ---------------------------
+print("\n" + "="*60)
+print("[COMPLETADO] Archivos generados:")
+print("="*60)
+
+archivos_generados = [
+    'modelo_nn_credit_risk.h5',
+    'scaler_nn.pkl',
+    'label_encoders_nn.pkl',
+    'feature_names_nn.pkl',
+    'scorecard_params.pkl',
+    'pd_calibrator.pkl',
+    'scorecard_poblacion.csv',
+    'scorecard_resumen_deciles.csv',
+    'analisis_variables_riesgo.csv',
+    'reference_defaults.pkl',
+    'Figure_1.png'
+]
+
+for archivo in archivos_generados:
+    if os.path.exists(archivo):
+        size = os.path.getsize(archivo) / 1024 / 1024
+        print(f" {archivo} ({size:.2f} MB)")
+    else:
+        print(f" {archivo} (NO ENCONTRADO)")
+
+print("\n ¡Entrenamiento completado!")
