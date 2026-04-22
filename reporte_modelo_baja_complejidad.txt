@@ -1,0 +1,18 @@
+RESUMEN DEL MODELO DE BAJA COMPLEJIDAD (Regresión Logística)
+
+AUC: 0.7025
+Brier: 0.2189
+
+REPORTE DE CLASIFICACIÓN
+                    precision    recall  f1-score   support
+
+       Pagador (0)       0.87      0.66      0.75     41942
+Incumplimiento (1)       0.34      0.64      0.45     11764
+
+          accuracy                           0.65     53706
+         macro avg       0.61      0.65      0.60     53706
+      weighted avg       0.75      0.65      0.68     53706
+
+MATRIZ DE CONFUSIÓN
+[[27629, 14313],
+ [4257, 7507]]
